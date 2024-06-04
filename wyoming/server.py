@@ -34,12 +34,19 @@ class AsyncEventHandler(ABC):
 
         try:
             while self._is_running:
-                event = await async_read_event(self.reader)
-                if event is None:
-                    break
+                try:
+                    event = await async_read_event(self.reader)
+                    if event is None:
+                        break
 
-                if not (await self.handle_event(event)):
+                    if not (await self.handle_event(event)):
+                        break
+                except (asyncio.CancelledError, ConnectionResetError) as e:
                     break
+                except Exception as e:
+                    # Log the exception and continue
+                    print(f"Error in handler: {e}", file=sys.stderr)
+                    await asyncio.sleep(1)  # Avoid busy loop in case of continuous errors
         finally:
             await self.disconnect()
 
@@ -50,6 +57,7 @@ class AsyncEventHandler(ABC):
         """Try to stop the event handler."""
         self._is_running = False
         self.writer.close()
+        await self.writer.wait_closed()
         self.reader.feed_eof()
 
 
@@ -123,12 +131,19 @@ class AsyncStdioServer(AsyncServer):
 
         handler = handler_factory(reader, writer)
         while True:
-            event = await async_read_event(reader)
-            if event is None:
-                break
+            try:
+                event = await async_read_event(reader)
+                if event is None:
+                    break
 
-            if not (await handler.handle_event(event)):
+                if not (await handler.handle_event(event)):
+                    break
+            except (asyncio.CancelledError, ConnectionResetError) as e:
                 break
+            except Exception as e:
+                # Log the exception and continue
+                print(f"Error in stdio server: {e}", file=sys.stderr)
+                await asyncio.sleep(1)  # Avoid busy loop in case of continuous errors
 
 
 class AsyncTcpServer(AsyncServer):
@@ -146,7 +161,12 @@ class AsyncTcpServer(AsyncServer):
             handler_callback, host=self.host, port=self.port
         )
 
-        await self._server.serve_forever()
+        try:
+            await self._server.serve_forever()
+        except Exception as e:
+            print(f"Error in TCP server: {e}", file=sys.stderr)
+        finally:
+            await self.stop()
 
     async def start(self, handler_factory: HandlerFactory) -> None:
         """Start server without blocking."""
@@ -163,6 +183,7 @@ class AsyncTcpServer(AsyncServer):
 
         if self._server is not None:
             self._server.close()
+            await self._server.wait_closed()
 
 
 class AsyncUnixServer(AsyncServer):
@@ -185,7 +206,10 @@ class AsyncUnixServer(AsyncServer):
 
         try:
             await self._server.serve_forever()
+        except Exception as e:
+            print(f"Error in Unix server: {e}", file=sys.stderr)
         finally:
+            await self.stop()
             # Unlink when we're done
             self.socket_path.unlink(missing_ok=True)
 
@@ -207,5 +231,7 @@ class AsyncUnixServer(AsyncServer):
 
         if self._server is not None:
             self._server.close()
+            await self._server.wait_closed()
 
         self.socket_path.unlink(missing_ok=True)
+
